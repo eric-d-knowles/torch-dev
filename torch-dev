@@ -28,11 +28,12 @@ echo
 
 # --- Defaults ---
 DEFAULT_TIME_HOURS=2
-DEFAULT_PARTITION="cs"
+DEFAULT_PARTITION=""
 DEFAULT_CPUS=4
 DEFAULT_RAM=32G
 DEFAULT_GPU=no
 DEFAULT_PROJECT=""
+DEFAULT_ACCOUNT="torch_pr_217_general"
 
 # Load previous values
 [[ -f "$PREFS_FILE" ]] && source "$PREFS_FILE"
@@ -43,17 +44,20 @@ CPUS="${CPUS:-$DEFAULT_CPUS}"
 RAM="${RAM:-$DEFAULT_RAM}"
 GPU="${GPU:-$DEFAULT_GPU}"
 PROJECT="${PROJECT:-$DEFAULT_PROJECT}"
+ACCOUNT="${ACCOUNT:-$DEFAULT_ACCOUNT}"
 
 # --- Prompt for preferences ---
 printf '\033[1;34mResource request:\033[0m\n'
+read -p "  Account (default: $ACCOUNT): " input_account
 read -p "  Hours (default: $TIME_HOURS): " input_time
-read -p "  Partition (default: $PARTITION): " input_partition
+read -p "  Partition [leave blank for default]: " input_partition
 read -p "  CPUs (default: $CPUS): " input_cpus
 read -p "  RAM (default: $RAM): " input_ram
 read -p "  GPU? [yes/no] (default: $GPU): " input_gpu
-read -p "  Project path under /scratch/$USER/ (default: $PROJECT): " input_project
+read -p "  Project path under /scratch/edk202/ (default: $PROJECT): " input_project
 echo
 
+[[ -n "$input_account" ]] && ACCOUNT="$input_account"
 [[ -n "$input_time" ]] && TIME_HOURS="$input_time"
 [[ -n "$input_partition" ]] && PARTITION="$input_partition"
 [[ -n "$input_cpus" ]] && CPUS="$input_cpus"
@@ -69,19 +73,19 @@ CPUS=$CPUS
 RAM=$RAM
 GPU=$GPU
 PROJECT="$PROJECT"
+ACCOUNT="$ACCOUNT"
 EOF
 
 # Build project path
 if [[ -n "$PROJECT" ]]; then
-    WORK_DIR="/scratch/$USER/$PROJECT"
+    WORK_DIR="/scratch/edk202/$PROJECT"
 else
-    WORK_DIR="/scratch/$USER"
+    WORK_DIR="/scratch/edk202"
 fi
 
 # --- Clean up old jobs ---
 echo -e "\033[1;34mCleaning up old jobs...\033[0m"
 ssh torch "scancel -u \$USER 2>/dev/null || true"
-ssh torch "rm -f ~/.config/torch/compute_node.txt"
 ssh torch "mkdir -p ~/.config/torch"
 
 # --- Submit job ---
@@ -90,29 +94,35 @@ echo -e "\033[1;34mSubmitting job...\033[0m"
 GPU_FLAG=""
 [[ "$GPU" == "yes" ]] && GPU_FLAG="--gres=gpu:1"
 
-ssh torch "nohup srun \\
+PARTITION_FLAG=""
+[[ -n "$PARTITION" ]] && PARTITION_FLAG="--partition=$PARTITION"
+
+JOB_ID=$(ssh torch "sbatch --parsable \\
     --time=${TIME_HOURS}:00:00 \\
-    --partition=$PARTITION \\
+    --account=$ACCOUNT \\
+    $PARTITION_FLAG \\
     --cpus-per-task=$CPUS \\
     --mem=$RAM \\
     $GPU_FLAG \\
-    --pty bash -c 'hostname > ~/.config/torch/compute_node.txt; sleep infinity' \\
-    > ~/.config/torch/srun.log 2>&1 &"
+    --wrap='sleep infinity'")
+
+echo "Submitted job $JOB_ID"
 
 # --- Wait for allocation ---
 echo -e "\033[1;34mWaiting for compute node...\033[0m"
 for i in {1..300}; do
-    COMPUTE_NODE=$(ssh torch "cat ~/.config/torch/compute_node.txt 2>/dev/null" || true)
+    COMPUTE_NODE=$(ssh torch "squeue -j $JOB_ID -h -o '%N' 2>/dev/null | grep -v '^$'" || true)
     if [[ -n "$COMPUTE_NODE" ]]; then
         break
     fi
-    sleep 2
+    sleep 1
     printf "."
 done
 echo
 
 if [[ -z "$COMPUTE_NODE" ]]; then
     echo -e "\033[1;31mTimed out waiting for allocation.\033[0m"
+    echo "Check job status: ssh torch 'squeue -u edk202'"
     exit 1
 fi
 
@@ -121,21 +131,20 @@ echo -e "\033[1;32mAllocated: $COMPUTE_NODE\033[0m"
 # --- Update SSH config ---
 echo -e "\033[1;34mUpdating SSH config...\033[0m"
 
-# Remove old torch-compute entry and add new one
-grep -v "^Host torch-compute$" "$SSH_CONFIG" | \
-grep -v "^\s*HostName.*torch.*internal" | \
-grep -v "^\s*ProxyJump torch$" > "${SSH_CONFIG}.tmp" || true
+# Remove old torch-compute entry
+sed -i.bak '/^Host torch-compute$/,/^Host /{ /^Host torch-compute$/d; /^Host /!d; }' "$SSH_CONFIG" 2>/dev/null || true
 
-cat >> "${SSH_CONFIG}.tmp" <<EOF
+# Append new entry
+cat >> "$SSH_CONFIG" <<EOF
 
 Host torch-compute
     HostName $COMPUTE_NODE
-    User $USER
+    User edk202
     ProxyJump torch
     ForwardAgent yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
 EOF
-
-mv "${SSH_CONFIG}.tmp" "$SSH_CONFIG"
 
 # --- Wait for compute node SSH ---
 echo -e "\033[1;34mWaiting for SSH on compute node...\033[0m"
@@ -154,9 +163,10 @@ code --folder-uri "vscode-remote://ssh-remote+torch-compute${WORK_DIR}"
 
 echo
 echo -e "\033[1;34mSession info:\033[0m"
+echo -e "  Job ID: \033[1;33m$JOB_ID\033[0m"
 echo -e "  Compute node: \033[1;33m$COMPUTE_NODE\033[0m"
 echo -e "  Work dir: \033[1;33m$WORK_DIR\033[0m"
 echo -e "  Time limit: \033[1;33m${TIME_HOURS}h\033[0m"
 echo
 echo -e "To reconnect: \033[1;33mcode --folder-uri \"vscode-remote://ssh-remote+torch-compute${WORK_DIR}\"\033[0m"
-echo -e "To cancel: \033[1;33mssh torch 'scancel -u \$USER'\033[0m"
+echo -e "To cancel: \033[1;33mssh torch 'scancel $JOB_ID'\033[0m"
