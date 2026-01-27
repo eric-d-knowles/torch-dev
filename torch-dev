@@ -51,7 +51,7 @@ read -p "  Partition (default: $PARTITION): " input_partition
 read -p "  CPUs (default: $CPUS): " input_cpus
 read -p "  RAM (default: $RAM): " input_ram
 read -p "  GPU? [yes/no] (default: $GPU): " input_gpu
-read -p "  Project path under /scratch/edk202/ (default: $PROJECT): " input_project
+read -p "  Project path under /scratch/$USER/ (default: $PROJECT): " input_project
 echo
 
 [[ -n "$input_time" ]] && TIME_HOURS="$input_time"
@@ -73,9 +73,9 @@ EOF
 
 # Build project path
 if [[ -n "$PROJECT" ]]; then
-    WORK_DIR="/scratch/edk202/$PROJECT"
+    WORK_DIR="/scratch/$USER/$PROJECT"
 else
-    WORK_DIR="/scratch/edk202"
+    WORK_DIR="/scratch/$USER"
 fi
 
 # --- Clean up old jobs ---
@@ -130,7 +130,7 @@ cat >> "${SSH_CONFIG}.tmp" <<EOF
 
 Host torch-compute
     HostName $COMPUTE_NODE
-    User edk202
+    User $USER
     ProxyJump torch
     ForwardAgent yes
 EOF
