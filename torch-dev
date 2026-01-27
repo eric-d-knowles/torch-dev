@@ -9,10 +9,30 @@ PREFS_FILE="$CONFIG_DIR/last_job_prefs"
 SSH_CONFIG="$HOME/.ssh/config"
 mkdir -p "$CONFIG_DIR"
 
+# --- Detect local and cluster usernames (avoid hardcoding) ---
+LOCAL_USER="${USER:-$(whoami)}"
+CLUSTER_USER=""
+
+# Try to read cluster username from SSH config for host 'torch'
+if [[ -f "$SSH_CONFIG" ]] && grep -qE '^Host[[:space:]]+torch$' "$SSH_CONFIG" 2>/dev/null; then
+    CLUSTER_USER=$(awk '/^Host[[:space:]]+torch$/,/^Host /{ if ($1=="User") print $2 }' "$SSH_CONFIG" | head -n1 | tr -d '\r' || true)
+fi
+
+# If not found, try asking the remote for its effective user
+if [[ -z "$CLUSTER_USER" ]]; then
+    CLUSTER_USER=$(ssh torch 'printf "%s" "$USER"' 2>/dev/null || true)
+fi
+
+# If still empty, prompt the local user
+if [[ -z "$CLUSTER_USER" ]]; then
+    read -p "Cluster username for SSH host 'torch' (default: $LOCAL_USER): " input_cluster_user
+    CLUSTER_USER="${input_cluster_user:-$LOCAL_USER}"
+fi
+
 # --- Cleanup on abort ---
 cleanup() {
     printf '\033[1;31mAborted. Cleaning up...\033[0m\n'
-    ssh torch 'scancel -u $USER 2>/dev/null || true'
+    ssh torch "scancel -u $CLUSTER_USER 2>/dev/null || true"
     exit 1
 }
 trap cleanup INT TERM
@@ -54,7 +74,7 @@ read -p "  Partition [leave blank for default]: " input_partition
 read -p "  CPUs (default: $CPUS): " input_cpus
 read -p "  RAM (default: $RAM): " input_ram
 read -p "  GPU? [yes/no] (default: $GPU): " input_gpu
-read -p "  Project path under /scratch/edk202/ (default: $PROJECT): " input_project
+read -p "  Project path under /scratch/$CLUSTER_USER/ (default: $PROJECT): " input_project
 echo
 
 [[ -n "$input_account" ]] && ACCOUNT="$input_account"
@@ -78,14 +98,14 @@ EOF
 
 # Build project path
 if [[ -n "$PROJECT" ]]; then
-    WORK_DIR="/scratch/edk202/$PROJECT"
+    WORK_DIR="/scratch/$CLUSTER_USER/$PROJECT"
 else
-    WORK_DIR="/scratch/edk202"
+    WORK_DIR="/scratch/$CLUSTER_USER"
 fi
 
 # --- Clean up old jobs ---
 echo -e "\033[1;34mCleaning up old jobs...\033[0m"
-ssh torch "scancel -u \$USER 2>/dev/null || true"
+ssh torch "scancel -u $CLUSTER_USER 2>/dev/null || true"
 ssh torch "mkdir -p ~/.config/torch"
 
 # --- Submit job ---
@@ -122,7 +142,7 @@ echo
 
 if [[ -z "$COMPUTE_NODE" ]]; then
     echo -e "\033[1;31mTimed out waiting for allocation.\033[0m"
-    echo "Check job status: ssh torch 'squeue -u edk202'"
+    echo "Check job status: ssh torch 'squeue -u $CLUSTER_USER'"
     exit 1
 fi
 
@@ -139,7 +159,7 @@ cat >> "$SSH_CONFIG" <<EOF
 
 Host torch-compute
     HostName $COMPUTE_NODE
-    User edk202
+    User $CLUSTER_USER
     ProxyJump torch
     ForwardAgent yes
     StrictHostKeyChecking no
@@ -159,7 +179,22 @@ echo
 
 # --- Launch VS Code ---
 echo -e "\033[1;32mLaunching VS Code...\033[0m"
-code --folder-uri "vscode-remote://ssh-remote+torch-compute${WORK_DIR}"
+if command -v code >/dev/null 2>&1; then
+    code --folder-uri "vscode-remote://ssh-remote+torch-compute${WORK_DIR}"
+else
+    echo -e "\033[1;33m'code' CLI not found; please install it to open VS Code from the terminal.\033[0m"
+    echo "From Visual Studio Code: open the Command Palette and run:" 
+    echo "  Shell Command: Install 'code' command in PATH"
+    echo
+    echo "Or install VS Code via Homebrew (macOS):"
+    echo "  brew install --cask visual-studio-code"
+    echo
+    echo "After installing, run:" 
+    echo "  code --folder-uri \"vscode-remote://ssh-remote+torch-compute${WORK_DIR}\""
+    echo
+    echo "You can also open the following URI manually in VS Code:" 
+    echo "  vscode-remote://ssh-remote+torch-compute${WORK_DIR}"
+fi
 
 echo
 echo -e "\033[1;34mSession info:\033[0m"
